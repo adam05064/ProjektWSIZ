@@ -6,12 +6,72 @@ from geopy.geocoders import Nominatim
 from PIL import Image, ImageTk
 import io
 import webbrowser
+import mysql.connector
+from mysql.connector import Error
+from hashlib import sha256
 
 API_KEY = 'klucz do api'
 BASE_URL = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json'
 PHOTO_BASE_URL = 'https://maps.googleapis.com/maps/api/place/photo'
 RADIUS_KM = 5000
 
+# Database connection function
+def connect_db():
+    try:
+        conn = mysql.connector.connect(
+            host='172.29.37.125',
+            database='restaurants_db',
+            user='adam',
+            password='adam'
+        )
+        return conn
+    except Error as e:
+        print(f"Database connection error: {e}")
+        return None
+
+# Hash password function
+def hash_password(password):
+    return sha256(password.encode()).hexdigest()
+
+# Register user function
+def register_user(username, password):
+    conn = connect_db()
+    if conn is not None:
+        try:
+            cursor = conn.cursor()
+            hashed_password = hash_password(password)
+            cursor.execute('INSERT INTO users (username, password) VALUES (%s, %s)', (username, hashed_password))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            messagebox.showinfo("Success", "Registration successful!")
+            return True
+        except Error as e:
+            messagebox.showerror("Error", f"Registration failed: {e}")
+            return False
+    else:
+        messagebox.showerror("Error", "Database connection problem.")
+        return False
+
+# Login user function
+def login_user(username, password):
+    conn = connect_db()
+    if conn is not None:
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, password FROM users WHERE username = %s', (username,))
+            user = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            if user and user[1] == hash_password(password):
+                return user[0]
+            else:
+                return None
+        except Error as e:
+            messagebox.showerror("Error", f"Login failed: {e}")
+            return None
+
+# Geolocation function
 def get_location(address):
     geolocator = Nominatim(user_agent="meal_selector")
     location = geolocator.geocode(address)
@@ -20,6 +80,7 @@ def get_location(address):
     else:
         raise ValueError("Nie można znaleźć lokalizacji dla podanego adresu.")
 
+# Search restaurants function
 def search_restaurants(location, keyword='', radius_km=RADIUS_KM, type='restaurant'):
     params = {
         'location': f'{location.latitude},{location.longitude}',
@@ -32,6 +93,7 @@ def search_restaurants(location, keyword='', radius_km=RADIUS_KM, type='restaura
     results = response.json().get('results', [])
     return results
 
+# Filter restaurants function
 def filter_restaurants(restaurants, min_rating):
     filtered = [
         r for r in restaurants
@@ -39,30 +101,32 @@ def filter_restaurants(restaurants, min_rating):
     ]
     return filtered
 
-def analyze_user_preferences(selected_restaurants, user_preferences):
-    for restaurant in selected_restaurants:
-        name = restaurant['name']
-        if name in user_preferences:
-            user_preferences[name] += 1
-        else:
-            user_preferences[name] = 1
+# Analyze user preferences function
+def analyze_user_preferences(user_id, selected_restaurants):
+    conn = connect_db()
+    if conn is not None:
+        try:
+            cursor = conn.cursor()
+            for restaurant in selected_restaurants:
+                name = restaurant['name']
+                cursor.execute('SELECT count FROM user_preferences WHERE user_id = %s AND restaurant_name = %s', (user_id, name))
+                record = cursor.fetchone()
+                if record:
+                    cursor.execute('UPDATE user_preferences SET count = count + 1 WHERE user_id = %s AND restaurant_name = %s', (user_id, name))
+                else:
+                    cursor.execute('INSERT INTO user_preferences (user_id, restaurant_name, count) VALUES (%s, %s, 1)', (user_id, name))
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Error as e:
+            messagebox.showerror("Error", f"Error analyzing user preferences: {e}")
 
-def save_user_preferences(user_preferences, file_path='user_preferences.json'):
-    with open(file_path, 'w') as f:
-        json.dump(user_preferences, f)
-
-def load_user_preferences(file_path='user_preferences.json'):
-    try:
-        with open(file_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
+# Get photo function
 def get_photo(photo_reference):
     if not photo_reference:
         return None
     params = {
-        'maxwidth': 400,  # Adjust max width as needed
+        'maxwidth': 400,
         'photoreference': photo_reference,
         'key': API_KEY
     }
@@ -71,6 +135,7 @@ def get_photo(photo_reference):
         return response.url
     return None
 
+# On hover function to show photo
 def on_hover(event, photo_reference):
     if photo_reference:
         photo_url = get_photo(photo_reference)
@@ -80,13 +145,14 @@ def on_hover(event, photo_reference):
             image.thumbnail((400, 400))
             photo = ImageTk.PhotoImage(image)
             image_label.config(image=photo)
-            image_label.image = photo  # Keep a reference to avoid garbage collection
+            image_label.image = photo
         else:
             image_label.config(image='', text='Błąd pobierania zdjęcia')
     else:
         image_label.config(image='', text='Brak zdjęcia')
 
-def on_search():
+# On search function
+def on_search(user_id):
     address = address_entry.get()
     keyword = cuisine_var.get()  # Added for cuisine preferences
     try:
@@ -103,10 +169,7 @@ def on_search():
         if restaurants:
             filtered_restaurants = filter_restaurants(restaurants, min_rating)
 
-            user_preferences = load_user_preferences()
-
-            analyze_user_preferences(filtered_restaurants, user_preferences)
-            save_user_preferences(user_preferences)
+            analyze_user_preferences(user_id, filtered_restaurants)
 
             result_text_box.config(state=tk.NORMAL)
             result_text_box.delete(1.0, tk.END)
@@ -134,63 +197,132 @@ def on_search():
     except ValueError as e:
         messagebox.showerror("Błąd", str(e))
 
-root = tk.Tk()
-root.title("Wybór Restauracji")
-root.geometry("1200x800")
+# Create main app window function
+def create_main_app_window(user_id):
+    global address_entry, cuisine_var, min_rating_entry, results_label, result_text_box, image_label
 
-style = ttk.Style()
-style.configure("TLabel", font=("Helvetica", 12))
-style.configure("TButton", font=("Helvetica", 12))
-style.configure("TEntry", font=("Helvetica", 12))
+    main_app_window = tk.Toplevel(root)
+    main_app_window.title("Wybór Restauracji - Okno Główne")
+    main_app_window.geometry("1200x800")
 
-main_frame = ttk.Frame(root, padding="10")
-main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-root.columnconfigure(0, weight=1)
-root.rowconfigure(0, weight=1)
+    style = ttk.Style()
+    style.configure("TLabel", font=("Helvetica", 12))
+    style.configure("TButton", font=("Helvetica", 12))
+    style.configure("TEntry", font=("Helvetica", 12))
 
-left_panel = ttk.Frame(main_frame, padding="10")
-left_panel.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W))
+    main_frame = ttk.Frame(main_app_window, padding="10")
+    main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    main_app_window.columnconfigure(0, weight=1)
+    main_app_window.rowconfigure(0, weight=1)
 
-tk.Label(left_panel, text="Podaj adres:").grid(row=0, column=0, sticky=tk.W)
-address_entry = ttk.Entry(left_panel, width=50)
-address_entry.grid(row=1, column=0, pady=5, sticky=tk.W)
+    left_panel = ttk.Frame(main_frame, padding="10")
+    left_panel.grid(row=0, column=0, sticky=(tk.N, tk.S, tk.W))
 
-tk.Label(left_panel, text="Minimalna ocena (0-5):").grid(row=2, column=0, sticky=tk.W)
-min_rating_entry = ttk.Entry(left_panel, width=10)
-min_rating_entry.grid(row=3, column=0, pady=5, sticky=tk.W)
+    tk.Label(left_panel, text="Podaj adres:").grid(row=0, column=0, sticky=tk.W)
+    address_entry = ttk.Entry(left_panel, width=50)
+    address_entry.grid(row=1, column=0, pady=5, sticky=tk.W)
 
-# Added for cuisine preferences
-cuisine_var = tk.StringVar()
-cuisine_choices = ['Wszystkie', 'Kuchnia włoska', 'Kuchnia polska', 'Burgery', 'Fast food']
-cuisine_dropdown = ttk.Combobox(left_panel, text="Wybierz kuchnię", textvariable=cuisine_var, values=cuisine_choices)
-cuisine_dropdown.current(0)
-cuisine_dropdown.grid(row=4, column=0, pady=5, sticky=tk.W)
+    tk.Label(left_panel, text="Minimalna ocena (0-5):").grid(row=2, column=0, sticky=tk.W)
+    min_rating_entry = ttk.Entry(left_panel, width=10)
+    min_rating_entry.grid(row=3, column=0, pady=5, sticky=tk.W)
 
-search_button = ttk.Button(left_panel, text="Szukaj", command=on_search)
-search_button.grid(row=5, column=0, pady=10, sticky=(tk.W, tk.E))
+    # Added for cuisine preferences
+    cuisine_var = tk.StringVar()
+    cuisine_choices = ['Wszystkie', 'Kuchnia włoska', 'Kuchnia polska', 'Burgery', 'Fast food']
+    cuisine_dropdown = ttk.Combobox(left_panel, text="Wybierz kuchnię", textvariable=cuisine_var, values=cuisine_choices)
+    cuisine_dropdown.current(0)
+    cuisine_dropdown.grid(row=4, column=0, pady=5, sticky=tk.W)
 
-results_label = ttk.Label(left_panel, text="", wraplength=300)
-results_label.grid(row=6, column=0, pady=10, sticky=tk.W)
+    search_button = ttk.Button(left_panel, text="Szukaj", command=lambda: on_search(user_id))
+    search_button.grid(row=5, column=0, pady=10, sticky=(tk.W, tk.E))
 
-middle_panel = ttk.Frame(main_frame, padding="10")
-middle_panel.grid(row=0, column=1, sticky=(tk.N, tk.S, tk.W, tk.E))
+    results_label = ttk.Label(left_panel, text="", wraplength=300)
+    results_label.grid(row=6, column=0, pady=10, sticky=tk.W)
 
-scrollbar = ttk.Scrollbar(middle_panel)
-scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    middle_panel = ttk.Frame(main_frame, padding="10")
+    middle_panel.grid(row=0, column=1, sticky=(tk.N, tk.S, tk.W, tk.E))
 
-result_text_box = tk.Text(middle_panel, wrap=tk.WORD, yscrollcommand=scrollbar.set, state=tk.DISABLED, width=50)
-result_text_box.pack(expand=True, fill=tk.BOTH)
-scrollbar.config(command=result_text_box.yview)
+    scrollbar = ttk.Scrollbar(middle_panel)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-right_panel = ttk.Frame(main_frame, padding="10")
-right_panel.grid(row=0, column=2, sticky=(tk.N, tk.S, tk.W, tk.E))
+    result_text_box = tk.Text(middle_panel, wrap=tk.WORD, yscrollcommand=scrollbar.set, state=tk.DISABLED, width=50)
+    result_text_box.pack(expand=True, fill=tk.BOTH)
+    scrollbar.config(command=result_text_box.yview)
 
-image_label = ttk.Label(right_panel, text="Brak zdjęcia", wraplength=300)
-image_label.pack(expand=True, fill=tk.BOTH)
+    right_panel = ttk.Frame(main_frame, padding="10")
+    right_panel.grid(row=0, column=2, sticky=(tk.N, tk.S, tk.W, tk.E))
 
-main_frame.columnconfigure(0, weight=1)
-main_frame.columnconfigure(1, weight=2)
-main_frame.columnconfigure(2, weight=1)
-main_frame.rowconfigure(0, weight=1)
+    image_label = ttk.Label(right_panel, text="Brak zdjęcia", wraplength=300)
+    image_label.pack(expand=True, fill=tk.BOTH)
 
-root.mainloop()
+    main_frame.columnconfigure(0, weight=1)
+    main_frame.columnconfigure(1, weight=2)
+    main_frame.columnconfigure(2, weight=1)
+    main_frame.rowconfigure(0, weight=1)
+
+# Create login window function
+def login_window():
+    login_win = tk.Toplevel(root)
+    login_win.title("Login")
+    login_win.geometry("300x200")
+
+    tk.Label(login_win, text="Username:").pack(pady=5)
+    username_entry = ttk.Entry(login_win, width=30)
+    username_entry.pack(pady=5)
+
+    tk.Label(login_win, text="Password:").pack(pady=5)
+    password_entry = ttk.Entry(login_win, width=30, show="*")
+    password_entry.pack(pady=5)
+
+    def on_login():
+        username = username_entry.get()
+        password = password_entry.get()
+        user_id = login_user(username, password)
+        if user_id:
+            messagebox.showinfo("Success", "Login successful!")
+            login_win.destroy()
+            create_main_app_window(user_id)
+        else:
+            messagebox.showerror("Error", "Incorrect username or password.")
+
+    ttk.Button(login_win, text="Login", command=on_login).pack(pady=10)
+
+# Create register window function
+def register_window():
+    register_win = tk.Toplevel(root)
+    register_win.title("Register")
+    register_win.geometry("300x200")
+
+    tk.Label(register_win, text="Username:").pack(pady=5)
+    username_entry = ttk.Entry(register_win, width=30)
+    username_entry.pack(pady=5)
+
+    tk.Label(register_win, text="Password:").pack(pady=5)
+    password_entry = ttk.Entry(register_win, width=30, show="*")
+    password_entry.pack(pady=5)
+
+    def on_register():
+        username = username_entry.get()
+        password = password_entry.get()
+        if register_user(username, password):
+            register_win.destroy()
+
+    ttk.Button(register_win, text="Register", command=on_register).pack(pady=10)
+
+# Main window function
+def main_window():
+    global root
+
+    root = tk.Tk()
+    root.title("Meal Selector")
+    root.geometry("800x600")
+
+    ttk.Label(root, text="Select action:").pack(pady=20)
+
+    ttk.Button(root, text="Login", command=login_window).pack(pady=10)
+    ttk.Button(root, text="Register", command=register_window).pack(pady=10)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    main_window()
