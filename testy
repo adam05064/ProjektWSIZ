@@ -1,0 +1,27 @@
+import unittest
+from Obiady import (
+    connect_db,
+    hash_password,
+    search_restaurants,
+)
+
+class ProsteTestyMealSelector(unittest.TestCase):
+
+    def test_connect_db_lancuch_polaczenia(self):
+        oczekiwany_lancuch_polaczenia = "host='172.29.37.125', database='restaurants_db', user='adam', password='adam'"
+        lancuch_polaczenia = connect_db.__annotations__["return"][1].replace("\n", "").strip()
+        self.assertEqual(oczekiwany_lancuch_polaczenia, lancuch_polaczenia)
+
+    def test_hash_password_roznica_wynikow(self):
+        haslo = "haslo123"
+        hash1 = hash_password(haslo)
+        hash2 = hash_password(haslo)
+        self.assertNotEqual(hash1, hash2)
+
+    def test_search_restaurants_klucz_api(self):
+        klucz_api = "klucz do api"
+        parametry = search_restaurants.__annotations__["return"][1]["params"]
+        self.assertEqual(parametry["key"], klucz_api)
+
+if __name__ == "__main__":
+    unittest.main()
